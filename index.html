@@ -208,6 +208,9 @@ textarea { min-height: 76px; resize: vertical; border-radius: 16px; }
 }
 .btn.ghost { background: var(--accent-soft); color: var(--accent); }
 .btn.small { min-height: 42px; padding: 0 16px; font-size: 14px; border-radius: 14px; }
+.dupnote { margin-top: 10px; padding: 12px 14px; border-radius: 16px; background: var(--amber-bg); color: var(--amber); font-size: 14.5px; }
+.dupnote b { font-weight: 700; }
+.dupnote .actions { margin-top: 10px; }
 .row2 { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
 .check { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; cursor: pointer; }
 .check input { width: 20px; height: 20px; accent-color: var(--accent); margin: 0; }
@@ -484,6 +487,7 @@ window.FIREBASE_CONFIG = {
       <input type="text" id="fName" list="dlNames" placeholder="Medicine name, e.g. Napa 500" aria-label="Medicine name" maxlength="120" required>
       <button class="btn" type="submit" id="fSubmit">Add</button>
     </div>
+    <div class="dupnote" id="dupNote" role="alert" hidden></div>
     <div class="row2">
       <label class="check"><input type="checkbox" id="fUrgent"> Urgent, shelf is empty</label>
       <details id="fDetails">
@@ -916,6 +920,36 @@ window.FIREBASE_CONFIG = {
   var detailBody = $("detailBody");
   $("fDetails").addEventListener("toggle", function () { detailBody.hidden = !$("fDetails").open; });
 
+  function normKey(t) { return String(t || "").toLowerCase().replace(/[^a-z0-9\u0980-\u09FF]/g, ""); }
+  function sameOrBlank(a, b) { a = normKey(a); b = normKey(b); return !a || !b || a === b; }
+  function findDup(f, excludeId) {
+    var n = normKey(f.name);
+    if (!n) return null;
+    for (var k = 0; k < items.length; k++) {
+      var it = items[k];
+      if (it.id === excludeId || statusOf(it) === "received") continue;
+      if (normKey(it.name) !== n) continue;
+      if (normKey(it.strength) !== normKey(f.strength)) continue;
+      if (!sameOrBlank(it.company, f.company)) continue;
+      if (!sameOrBlank(it.form, f.form)) continue;
+      return it;
+    }
+    return null;
+  }
+  var pendingDup = null, lastSig = "", lastSigAt = 0;
+  function hideDup() { pendingDup = null; $("dupNote").hidden = true; }
+  function showDup(dup, f) {
+    pendingDup = { id: dup.id, f: f };
+    var label = [dup.name, dup.strength].filter(Boolean).join(" ");
+    var where = statusOf(dup) === "ordered" ? "already ordered" : "still to order";
+    var by = dup.addedBy ? ", added by " + nameOf(dup.addedBy) : "";
+    var q = qtyOf(dup) ? " (" + qtyOf(dup) + ")" : "";
+    var h = "<b>" + esc(label) + "</b> is already on the list" + esc(q) + ", " + where + esc(by) + ". It was not added again.";
+    h += '<div class="actions">' + (canModify(dup) ? '<button type="button" class="btn small" data-act="dupUpdate">Update that item</button>' : "") +
+      '<button type="button" class="btn ghost small" data-act="dupClose">Close</button></div>';
+    $("dupNote").innerHTML = h; $("dupNote").hidden = false;
+  }
+
   function fields() {
     return {
       name: $("fName").value.trim(),
@@ -930,6 +964,7 @@ window.FIREBASE_CONFIG = {
     };
   }
   function resetForm() {
+    hideDup();
     $("addForm").reset();
     $("fUnit").value = "strip";
     editingId = null;
@@ -963,6 +998,10 @@ window.FIREBASE_CONFIG = {
     e.preventDefault();
     var f = fields();
     if (!f.name) { $("fName").focus(); return; }
+    var dupItem = findDup(f, editingId);
+    if (dupItem) { showDup(dupItem, f); return; }
+    var sig = normKey(f.name) + "|" + normKey(f.strength) + "|" + normKey(f.company);
+    if (!editingId && lastSig === sig && Date.now() - lastSigAt < 1500) return;
     if (editingId) {
       var id = editingId;
       patchItem(id, f).then(function () { showToast("Changes saved"); });
@@ -971,6 +1010,7 @@ window.FIREBASE_CONFIG = {
       var it = Object.assign({ id: genId(), status: "need", addedAt: nowIso(), updatedAt: nowIso() }, f);
       if (!isManager && !actor && Object.keys(team).length) { showToast("Choose your name at the top first"); $("who").scrollIntoView({ block: "center" }); return; }
       if (actor) it.addedBy = actor;
+      lastSig = sig; lastSigAt = Date.now();
       saveItem(it);
       showToast(f.name + " added");
       resetForm();
@@ -1118,6 +1158,23 @@ window.FIREBASE_CONFIG = {
         setTimeout(function () { if (armedSet === "tm:" + tk) { armedSet = null; render(); } }, 3500);
       }
     }
+    else if (act === "dupClose") hideDup();
+    else if (act === "dupUpdate" && pendingDup) {
+      var pd = pendingDup, target = items.find(function (x) { return x.id === pd.id; });
+      if (target && canModify(target)) {
+        var nf = pd.f, patch = {
+          unit: nf.qty ? nf.unit : (target.unit || nf.unit),
+          qty: nf.qty || target.qty || null,
+          urgent: !!(target.urgent || nf.urgent),
+          note: nf.note || target.note || "",
+          company: target.company || nf.company,
+          supplier: target.supplier || nf.supplier,
+          form: target.form || nf.form
+        };
+        patchItem(target.id, patch).then(function () { showToast("Item updated"); });
+        resetForm(); $("fName").focus();
+      } else hideDup();
+    }
     else if (act === "logout") { if (auth) auth.signOut(); }
     else if (act === "addSamples") addSamples();
     else if (act === "clearSamples") {
@@ -1126,6 +1183,7 @@ window.FIREBASE_CONFIG = {
     }
   });
 
+  $("fName").addEventListener("input", hideDup);
   $("q").addEventListener("input", function (e) { query = e.target.value.trim(); render(); });
   $("groupBy").addEventListener("change", function (e) { groupMode = e.target.value; render(); });
   $("byFilter").addEventListener("change", function (e) { by = e.target.value; render(); });
