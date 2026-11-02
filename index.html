@@ -602,6 +602,7 @@ window.FIREBASE_CONFIG = {
 
   var fmtLong = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Dhaka", weekday: "long", day: "numeric", month: "long", year: "numeric" });
   var fmtShort = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Dhaka", day: "numeric", month: "short" });
+  var fmtTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Dhaka", hour: "numeric", minute: "2-digit", hour12: true });
   var fmtFull = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Dhaka", day: "numeric", month: "short", year: "numeric" });
   $("today").textContent = fmtLong.format(new Date());
 
@@ -669,13 +670,50 @@ window.FIREBASE_CONFIG = {
     if (i.note) s += " - " + i.note;
     return s;
   }
-  function groupByKey(list, key) {
-    var map = {};
-    list.forEach(function (i) { var k = (i[key] || "").trim(); (map[k] = map[k] || []).push(i); });
-    var keys = Object.keys(map).sort(function (a, b) {
-      if (!a) return 1; if (!b) return -1; return a.localeCompare(b);
+  function pickLabel(vars) {
+    var cnt = {}, best = "", bc = 0;
+    vars.forEach(function (v) { cnt[v] = (cnt[v] || 0) + 1; });
+    Object.keys(cnt).forEach(function (v) {
+      var mixed = v !== v.toLowerCase() && v !== v.toUpperCase();
+      var score = cnt[v] * 2 + (mixed ? 1 : 0);
+      if (score > bc) { bc = score; best = v; }
     });
-    return keys.map(function (k) { return [k, map[k]]; });
+    return best;
+  }
+  function groupByKey(list, key) {
+    var map = {}, vars = {};
+    list.forEach(function (i) {
+      var raw = String(i[key] || "").trim().replace(/\s+/g, " ");
+      var k = normKey(raw);
+      (map[k] = map[k] || []).push(i); (vars[k] = vars[k] || []).push(raw);
+    });
+    var out = Object.keys(map).map(function (k) { return [k ? pickLabel(vars[k]) : "", map[k]]; });
+    out.sort(function (a, b) { if (!a[0]) return 1; if (!b[0]) return -1; return a[0].localeCompare(b[0]); });
+    return out;
+  }
+  function findCo(name) {
+    var k = normKey(name);
+    for (var c in companies) { if (normKey(companies[c].name) === k) return companies[c]; }
+    return {};
+  }
+  function canonLabel(key, v) {
+    v = String(v || "").trim().replace(/\s+/g, " ");
+    var k = normKey(v);
+    if (!k) return "";
+    if (key === "company") { for (var c in companies) { if (normKey(companies[c].name) === k) return companies[c].name; } }
+    var g = groupByKey(items.filter(function (it) { return normKey(it[key]) === k; }), key);
+    return g.length ? g[0][0] : v;
+  }
+  function renameCompany(list, name) {
+    var chunks = [], n;
+    for (n = 0; n < list.length; n += 400) chunks.push(list.slice(n, n + 400));
+    return chunks.reduce(function (p, ch) {
+      return p.then(function () {
+        var bt = fs.batch();
+        ch.forEach(function (it) { bt.update(col.doc(it.id), { company: name, updatedAt: nowIso() }); });
+        return bt.commit();
+      });
+    }, Promise.resolve());
   }
   function groupBySupplier(list) { return groupByKey(list, "supplier"); }
   function sorter(a, b) {
@@ -730,7 +768,7 @@ window.FIREBASE_CONFIG = {
   function companyView(list) {
     if (!list.length) return '<div class="empty"><p>No company lists right now. Items waiting to order are split by company here.</p></div>';
     return groupByKey(list, "company").map(function (g) {
-      var name = g[0], co = companies[ckey(name)] || {}, phone = co.phone || "";
+      var name = g[0], co = findCo(name), phone = co.phone || "";
       var txt = companyText(name, g[1]);
       var rows = g[1].slice().sort(sorter).map(function (i) {
         return "<li><span class=\"cl\">" + esc([i.name, i.strength, i.form].filter(Boolean).join(" ")) +
@@ -772,6 +810,16 @@ window.FIREBASE_CONFIG = {
     }).join("") + "</ul>" : '<p class="empty-s">No companies yet. Create the first one above.</p>';
     h += "</section>";
 
+    var cg = groupByKey(items.filter(function (i) { return normKey(i.company); }), "company");
+    if (cg.length) {
+      h += '<section class="panel setup"><h2>Fix company spelling</h2><p class="hint">Capital or small letters and extra spaces already count as the same company. If a name is spelled wrong, for example Reneta instead of Renata, type the right spelling and tap Rename. All its medicines move to that name.</p><ul class="setlist">' +
+        cg.map(function (g) {
+          var rk = normKey(g[0]);
+          return '<li><span class="sn">' + esc(g[0]) + '</span><span class="sp">' + g[1].length + (g[1].length === 1 ? " item" : " items") + '</span><span class="sr"><input type="text" id="rn_' + rk + '" value="' + esc(g[0]) + '" maxlength="60" aria-label="Correct spelling for ' + esc(g[0]) + '">' +
+            '<button type="button" class="btn ghost small" data-act="coRename" data-key="' + rk + '">Rename</button></span></li>';
+        }).join("") + "</ul></section>";
+    }
+
     h += '<section class="panel setup"><h2>Salesmen</h2><p class="hint">Create a login for each salesman. They sign in on the site with their name and the 6-digit PIN you set here. Every medicine they add shows their name.</p>' +
       '<div class="inline"><input type="text" id="tmNew" placeholder="Salesman name" maxlength="40" aria-label="New salesman name">' +
       '<input type="tel" id="tmNewPin" placeholder="6-digit PIN" inputmode="numeric" maxlength="6" aria-label="6-digit PIN">' +
@@ -803,7 +851,7 @@ window.FIREBASE_CONFIG = {
     var meta = [];
     if (i.company && groupMode !== "company") meta.push(esc(i.company));
     if (i.supplier && groupMode !== "supplier") meta.push(esc(i.supplier));
-    if (i.addedAt) meta.push("added " + fmtShort.format(new Date(i.addedAt)));
+    if (i.addedAt) meta.push("added " + fmtShort.format(new Date(i.addedAt)) + ", " + fmtTime.format(new Date(i.addedAt)));
     if (i.addedBy) meta.push("by " + esc(nameOf(i.addedBy)));
     var chips = "";
     if (i.urgent && st === "need") chips += '<span class="badge urgent">Urgent</span>';
@@ -918,8 +966,8 @@ window.FIREBASE_CONFIG = {
     /* datalists */
     function uniq(k, extra) {
       var seen = {}, out = [];
-      (extra || []).forEach(function (v) { v = String(v || "").trim(); if (v && !seen[v.toLowerCase()]) { seen[v.toLowerCase()] = 1; out.push(v); } });
-      items.forEach(function (i) { var v = (i[k] || "").trim(); if (v && !seen[v.toLowerCase()]) { seen[v.toLowerCase()] = 1; out.push(v); } });
+      (extra || []).forEach(function (v) { v = String(v || "").trim(); if (v && !seen[normKey(v)]) { seen[normKey(v)] = 1; out.push(v); } });
+      items.forEach(function (i) { var v = (i[k] || "").trim(); if (v && !seen[normKey(v)]) { seen[normKey(v)] = 1; out.push(v); } });
       return out.sort().map(function (v) { return '<option value="' + esc(v) + '">'; }).join("");
     }
     $("dlNames").innerHTML = uniq("name");
@@ -1026,6 +1074,8 @@ window.FIREBASE_CONFIG = {
     e.preventDefault();
     var f = fields();
     if (!f.name) { $("fName").focus(); return; }
+    f.company = canonLabel("company", f.company);
+    f.supplier = canonLabel("supplier", f.supplier);
     var dupItem = findDup(f, editingId);
     if (dupItem) { showDup(dupItem, f); return; }
     var sig = normKey(f.name) + "|" + normKey(f.strength) + "|" + normKey(f.company);
@@ -1116,7 +1166,7 @@ window.FIREBASE_CONFIG = {
     else if (act === "view") { viewMode = b.getAttribute("data-view"); armedCo = null; render(); }
     else if (act === "coCopy") {
       var cn = b.getAttribute("data-co");
-      var cl = items.filter(function (i) { return statusOf(i) === "need" && (i.company || "").trim() === cn; });
+      var cl = items.filter(function (i) { return statusOf(i) === "need" && normKey(i.company) === normKey(cn); });
       var ct = companyText(cn, cl);
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(ct).then(function () { showToast("List for " + (cn || "items") + " copied"); },
@@ -1127,7 +1177,7 @@ window.FIREBASE_CONFIG = {
       var on = b.getAttribute("data-co");
       if (armedCo === on) {
         armedCo = null;
-        items.filter(function (i) { return statusOf(i) === "need" && (i.company || "").trim() === on; })
+        items.filter(function (i) { return statusOf(i) === "need" && normKey(i.company) === normKey(on); })
           .forEach(function (i) { patchItem(i.id, { status: "ordered" }); });
         showToast("Marked as ordered");
       } else {
@@ -1185,6 +1235,15 @@ window.FIREBASE_CONFIG = {
         armedSet = "tm:" + tk; render();
         setTimeout(function () { if (armedSet === "tm:" + tk) { armedSet = null; render(); } }, 3500);
       }
+    }
+    else if (act === "coRename" && isManager) {
+      var rk = b.getAttribute("data-key"), rin = document.getElementById("rn_" + rk);
+      var nn = rin ? rin.value.trim().replace(/\s+/g, " ") : "";
+      if (!nn) { showToast("Type the correct name first"); return; }
+      var targets = items.filter(function (i) { return normKey(i.company) === rk; });
+      b.disabled = true;
+      renameCompany(targets, nn).then(function () { showToast("Renamed " + targets.length + (targets.length === 1 ? " item" : " items") + " to " + nn); }, onErr)
+        .then(function () { b.disabled = false; });
     }
     else if (act === "dupClose") hideDup();
     else if (act === "dupUpdate" && pendingDup) {
