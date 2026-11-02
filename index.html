@@ -265,7 +265,7 @@ details[open] > summary::after { content: "\2212"; }
 .viewswitch button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
 
 .toolbar { display: flex; flex-direction: column; gap: 10px; }
-.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 10px; }
+.pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .toolbar select, .toolbar input { background: var(--surface); box-shadow: var(--shadow); }
 .toolbar .field > span { padding-left: 4px; }
 .tabs { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 4px; scrollbar-width: none; }
@@ -534,7 +534,10 @@ window.FIREBASE_CONFIG = {
   </div>
 
   <section class="toolbar" id="toolbarSec" aria-label="Find and filter">
-    <input type="search" id="q" placeholder="Search medicine, company or dealer" aria-label="Search the list">
+    <input type="search" id="q" placeholder="Search medicine name" aria-label="Search medicine">
+    <label class="field" id="coFilterWrap"><span>Company</span>
+      <select id="coFilter" aria-label="Show only one company"><option value="">All companies</option></select>
+    </label>
     <div class="pair">
       <label class="field" id="groupWrap"><span>Group list by</span>
         <select id="groupBy" aria-label="Group list by">
@@ -703,6 +706,8 @@ window.FIREBASE_CONFIG = {
       });
     }
     if (by !== "all") out = out.filter(function (i) { return i.addedBy === by; });
+    if (coSel === "__none") out = out.filter(function (i) { return !normKey(i.company); });
+    else if (coSel) out = out.filter(function (i) { return normKey(i.company) === normKey(coSel); });
     return out;
   }
   function ckey(n) {
@@ -858,6 +863,28 @@ window.FIREBASE_CONFIG = {
     $("who").hidden = !whoHtml;
     if (whoHtml !== lastWhoHtml) { $("who").innerHTML = whoHtml; lastWhoHtml = whoHtml; }
 
+    var base = items.filter(function (i) {
+      return viewMode === "company" ? statusOf(i) === "need" : (filter === "all" || statusOf(i) === filter);
+    });
+    var cnt = {}, noCo = 0, label = {};
+    base.forEach(function (i) {
+      var k = normKey(i.company);
+      if (!k) { noCo++; return; }
+      cnt[k] = (cnt[k] || 0) + 1; label[k] = label[k] || String(i.company).trim();
+    });
+    Object.keys(companies).forEach(function (ck) {
+      var nm = companies[ck] && companies[ck].name, k = normKey(nm);
+      if (k) label[k] = label[k] || String(nm).trim();
+    });
+    if (coSel && coSel !== "__none" && !label[normKey(coSel)]) coSel = "";
+    var coKeys = Object.keys(label).sort(function (a, b) { return label[a].localeCompare(label[b]); });
+    var coHtml = '<option value="">All companies</option>' + coKeys.map(function (k) {
+      return '<option value="' + esc(label[k]) + '">' + esc(label[k]) + " (" + (cnt[k] || 0) + ")</option>";
+    }).join("") + (noCo ? '<option value="__none">No company (' + noCo + ")</option>" : "");
+    if (coHtml !== lastCoHtml) { $("coFilter").innerHTML = coHtml; lastCoHtml = coHtml; }
+    $("coFilter").value = coSel;
+    $("coFilterWrap").hidden = !coKeys.length && !noCo;
+
     var vis = applyFilters(items.filter(function (i) { return filter === "all" || statusOf(i) === filter; }));
     vis.sort(sorter);
 
@@ -936,6 +963,7 @@ window.FIREBASE_CONFIG = {
     }
     return null;
   }
+  var coSel = "", lastCoHtml = "";
   var pendingDup = null, lastSig = "", lastSigAt = 0;
   function hideDup() { pendingDup = null; $("dupNote").hidden = true; }
   function showDup(dup, f) {
@@ -1184,6 +1212,7 @@ window.FIREBASE_CONFIG = {
   });
 
   $("fName").addEventListener("input", hideDup);
+  $("coFilter").addEventListener("change", function (e) { coSel = e.target.value; render(); });
   $("q").addEventListener("input", function (e) { query = e.target.value.trim(); render(); });
   $("groupBy").addEventListener("change", function (e) { groupMode = e.target.value; render(); });
   $("byFilter").addEventListener("change", function (e) { by = e.target.value; render(); });
